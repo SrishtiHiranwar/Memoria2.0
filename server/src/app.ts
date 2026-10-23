@@ -36,7 +36,9 @@ import { requireStoryTransition } from './services/story-status.js';
 import { addLicensedImages } from './services/wikimedia.js';
 
 const app = express();
-const uploadsDirectory = fileURLToPath(new URL('../uploads/', import.meta.url));
+const uploadsDirectory = process.env.UPLOADS_DIRECTORY
+  ? path.resolve(process.env.UPLOADS_DIRECTORY)
+  : fileURLToPath(new URL('../uploads/', import.meta.url));
 const medicalRecordsDirectory = path.join(uploadsDirectory, 'medical-records');
 const upload = multer({
   storage: multer.memoryStorage(),

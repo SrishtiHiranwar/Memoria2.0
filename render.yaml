@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: memoria-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run db:generate --workspace @memoria/server && npm run build --workspace @memoria/server
+    startCommand: npm run db:migrate --workspace @memoria/server && npm run start --workspace @memoria/server
+    healthCheckPath: /health
+    disk:
+      name: memoria-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: file:/var/data/memoria.db
+      - key: UPLOADS_DIRECTORY
+        value: /var/data/uploads
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
