@@ -4,6 +4,7 @@ import { geminiStorySchema, geminiSummarySchema } from './schemas.js';
 
 const safeScene = {
   photoId: 'photo_1',
+  imageSearchQuery: 'garden flowers',
   narration: 'The garden has bright flowers.',
   recallQuestion: 'What can you see?',
   expectedAnswer: 'Flowers',
@@ -12,6 +13,14 @@ const safeScene = {
 
 test('Gemini story output requires supported choices and expected answer', () => {
   assert.equal(geminiStorySchema.safeParse({ title: 'A garden', scenes: [safeScene] }).success, true);
+  assert.equal(geminiStorySchema.safeParse({
+    title: 'A garden',
+    scenes: [{ ...safeScene, photoId: null }],
+  }).success, true);
+  assert.equal(geminiStorySchema.safeParse({
+    title: 'A garden',
+    scenes: [{ ...safeScene, imageSearchQuery: undefined }],
+  }).success, false);
   assert.equal(geminiStorySchema.safeParse({
     title: 'A garden',
     scenes: [{ ...safeScene, answerOptions: ['A blue bicycle', 'A quiet room'] }],

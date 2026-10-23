@@ -21,17 +21,38 @@ export const captionSchema = z.object({
   caption: z.string().trim().min(1).max(500),
 }).strict();
 
+export const externalImageSchema = z.object({
+  url: z.string().url(),
+  sourcePageUrl: z.string().url(),
+  licenseName: z.string().trim().min(1).max(100),
+  licenseUrl: z.string().url(),
+  attribution: z.string().trim().min(1).max(400),
+}).strict();
+
 export const storyGenerateSchema = z.object({
   prompt: z.string().trim().min(5).max(2000),
 }).strict();
 
-export const sceneSchema = z.object({
-  photoId: idSchema,
+const baseSceneSchema = z.object({
+  photoId: idSchema.nullable(),
+  imageSearchQuery: z.string().trim().min(1).max(120).optional(),
+  externalImage: externalImageSchema.optional(),
   narration: z.string().trim().min(1).max(600),
   recallQuestion: z.string().trim().min(1).max(240),
   expectedAnswer: z.string().trim().min(1).max(200),
   answerOptions: z.array(z.string().trim().min(1).max(200)).min(2).max(3),
-}).strict().refine((scene) => new Set(scene.answerOptions).size === scene.answerOptions.length, {
+}).strict();
+
+const uniqueAnswerOptions = (scene: { answerOptions: string[] }) =>
+  new Set(scene.answerOptions).size === scene.answerOptions.length;
+
+export const sceneSchema = baseSceneSchema.refine(uniqueAnswerOptions, {
+  message: 'Answer choices must be different.',
+});
+
+const generatedSceneSchema = baseSceneSchema.extend({
+  imageSearchQuery: safeGeneratedText(120),
+}).strict().refine(uniqueAnswerOptions, {
   message: 'Answer choices must be different.',
 });
 
@@ -58,10 +79,11 @@ export const alertFallbackSchema = z.object({ fallbackShown: z.literal(true) }).
 
 export const geminiStorySchema = z.object({
   title: safeGeneratedText(160),
-  scenes: z.array(sceneSchema).min(1).max(8),
+  scenes: z.array(generatedSceneSchema).min(1).max(8),
 }).strict().superRefine((story, context) => {
   story.scenes.forEach((scene, index) => {
     const textFields = [
+      ...(scene.imageSearchQuery ? [['imageSearchQuery', scene.imageSearchQuery] as const] : []),
       ['narration', scene.narration],
       ['recallQuestion', scene.recallQuestion],
       ['expectedAnswer', scene.expectedAnswer],

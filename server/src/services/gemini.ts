@@ -17,13 +17,14 @@ const model = 'gemini-3.5-flash-lite';
 const sceneResponseSchema = {
   type: 'object',
   properties: {
-    photoId: { type: 'string' },
+    photoId: { type: ['string', 'null'] },
+    imageSearchQuery: { type: 'string' },
     narration: { type: 'string' },
     recallQuestion: { type: 'string' },
     expectedAnswer: { type: 'string' },
     answerOptions: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 3 },
   },
-  required: ['photoId', 'narration', 'recallQuestion', 'expectedAnswer', 'answerOptions'],
+  required: ['photoId', 'imageSearchQuery', 'narration', 'recallQuestion', 'expectedAnswer', 'answerOptions'],
   additionalProperties: false,
 };
 const storyResponseSchema = {
@@ -45,6 +46,28 @@ const summaryResponseSchema = {
   required: ['summary', 'concerns', 'doctorReviewNote'],
   additionalProperties: false,
 };
+
+export function requestedSceneCount(prompt: string) {
+  const match = prompt.match(/\b(?:exactly|create|make|write|generate|with|have|has|contain|contains)\s+(?:exactly\s+)?(1|2|3|4|5|6|7|8|one|two|three|four|five|six|seven|eight)(?:\s+(?:short|brief|gentle|original|custom|story|narrative))?\s+scenes?\b/i);
+  if (!match) return undefined;
+  const count = match[1].toLowerCase();
+  const words: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+  };
+  return words[count] ?? Number(count);
+}
+
+function requestedExactQuestion(prompt: string) {
+  const matches = [...prompt.matchAll(/["“]([^"”]{1,240}\?)["”]/g)];
+  return matches.length === 1 ? matches[0][1] : undefined;
+}
 
 function recordCall() {
   console.info(JSON.stringify({
@@ -112,7 +135,7 @@ export async function draftStory(
       title: cached.value.title,
       scenes: cached.value.scenes.map((scene) => ({
         ...scene,
-        photoId: keyedPhotos.find((photo) => photo.id === scene.photoId)?.databaseId ?? scene.photoId,
+        photoId: keyedPhotos.find((photo) => photo.id === scene.photoId)?.databaseId ?? null,
       })),
     };
   }
@@ -121,7 +144,12 @@ export async function draftStory(
   const input = JSON.stringify({
     doctorPrompt: prompt,
     photos: keyedPhotos.map(({ id, caption }) => ({ id, caption })),
+    photoChoiceNote: keyedPhotos.length > 0
+      ? 'Choose a supplied photo ID only when it clearly fits a scene. Otherwise use null and provide generic image search terms.'
+      : 'There are no patient photos. Use null for every photoId and provide generic image search terms for each scene.',
   });
+  const sceneCount = requestedSceneCount(prompt);
+  const exactQuestion = requestedExactQuestion(prompt);
 
   let parsed: z.infer<typeof geminiStorySchema> | undefined;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -130,7 +158,20 @@ export async function draftStory(
       response = await generateJson(systemPrompt, input, storyResponseSchema);
       parsed = geminiStorySchema.parse(response);
       const allowedIds = new Set(keyedPhotos.map((photo) => photo.id));
-      if (parsed.scenes.some((scene) => !allowedIds.has(scene.photoId))) {
+      const invalidPhoto = parsed.scenes.some((scene) => scene.photoId !== null && !allowedIds.has(scene.photoId));
+      const wrongSceneCount = sceneCount !== undefined && parsed.scenes.length !== sceneCount;
+      const missingExactQuestion = exactQuestion !== undefined
+        && !parsed.scenes.some((scene) => scene.recallQuestion === exactQuestion);
+      if (invalidPhoto || wrongSceneCount || missingExactQuestion) {
+        if (wrongSceneCount || missingExactQuestion) {
+          console.warn(JSON.stringify({
+            type: 'gemini_output_rejected_by_prompt_constraints',
+            attempt: attempt + 1,
+            expectedSceneCount: sceneCount,
+            actualSceneCount: parsed.scenes.length,
+            exactQuestionRequired: missingExactQuestion,
+          }));
+        }
         parsed = undefined;
       } else {
         break;
@@ -158,7 +199,9 @@ export async function draftStory(
     title: parsed.title,
     scenes: parsed.scenes.map((scene) => ({
       ...scene,
-      photoId: keyedPhotos.find((photo) => photo.id === scene.photoId)!.databaseId,
+      photoId: scene.photoId === null
+        ? null
+        : keyedPhotos.find((photo) => photo.id === scene.photoId)!.databaseId,
     })),
   };
 }

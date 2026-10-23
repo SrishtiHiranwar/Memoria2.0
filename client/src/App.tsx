@@ -3,8 +3,17 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 type Role = 'DOCTOR' | 'PATIENT';
 type User = { id: string; email: string; role: Role; patientId: string | null };
 type Photo = { id: string; imageUrl: string; caption: string; createdAt: string };
+type ExternalImage = {
+  url: string;
+  sourcePageUrl: string;
+  licenseName: string;
+  licenseUrl: string;
+  attribution: string;
+};
 type Scene = {
-  photoId: string;
+  photoId: string | null;
+  imageSearchQuery?: string;
+  externalImage?: ExternalImage;
   narration: string;
   recallQuestion: string;
   expectedAnswer: string;
@@ -107,6 +116,19 @@ function PhotoImage({ photo, alt, className }: { photo: Photo; alt: string; clas
 
   if (failed) return <span className={`photo-unavailable ${className ?? ''}`}>Photo unavailable</span>;
   return <img className={className} src={src} alt={alt} />;
+}
+
+function ExternalImagePreview({ image, patientView = false }: { image: ExternalImage; patientView?: boolean }) {
+  return (
+    <figure className={patientView ? 'external-image-preview patient-image-preview' : 'external-image-preview'}>
+      <img src={image.url} alt="Illustration suggested for this story scene" referrerPolicy="no-referrer" />
+      <figcaption>
+        Image: <a href={image.sourcePageUrl} target="_blank" rel="noreferrer">{image.attribution}</a>
+        {' · '}
+        <a href={image.licenseUrl} target="_blank" rel="noreferrer">{image.licenseName}</a>
+      </figcaption>
+    </figure>
+  );
 }
 
 function App() {
@@ -449,13 +471,14 @@ function PatientDetail({
 
       <section className="content-card">
         <div className="section-heading"><div><p className="eyebrow">Doctor-reviewed stories</p><h2>Stories <span className="subtle-count">{patient.stories.length}</span></h2></div></div>
-        {patient.photos.length > 0 && <form onSubmit={generate} className="story-prompt-form">
+        <form onSubmit={generate} className="story-prompt-form">
           <label htmlFor="story-prompt">Story idea</label>
           <textarea id="story-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="A calm story about noticing familiar things in these photos…" minLength={5} maxLength={2000} required rows={3} />
-          <p className="help-text">Gemini receives this prompt and photo captions only. Do not include names or personal details.</p>
+          <p className="help-text">Stories are built from your prompt, not a fixed template. Gemini receives the prompt and photo captions only. If a scene needs an image, Memoria searches Wikimedia Commons for a freely licensed candidate using generic visual terms. Do not include names or personal details.</p>
+          {patient.photos.length === 0 && <p className="help-text">No patient photos are uploaded. Scenes can still be drafted with licensed image candidates.</p>}
           {storyError && <p className="inline-error">{storyError}</p>}
           <button className="button button-primary" disabled={generating}>{generating ? 'Drafting story…' : '✦ Draft story with AI'}</button>
-        </form>}
+        </form>
         {patient.stories.length === 0 ? <p className="muted empty-inline">No stories yet. Start with a short prompt above.</p> :
           <div className="story-list">{patient.stories.map((story) => <StoryEditor key={story.id} story={story} patient={patient} patients={patients} onRefresh={onRefresh} onNotice={onNotice} />)}</div>}
       </section>
@@ -542,7 +565,8 @@ function StoryEditor({
           {scenes.map((scene, index) => {
             const photo = patient.photos.find((item) => item.id === scene.photoId);
             return <div className="scene-editor" key={`${scene.photoId}-${index}`}>
-              <div className="scene-editor-heading"><span>SCENE {index + 1}</span>{photo && <PhotoImage photo={photo} alt="" />}</div>
+              <div className="scene-editor-heading"><span>SCENE {index + 1}</span>{photo ? <PhotoImage photo={photo} alt="" /> : scene.externalImage ? <img src={scene.externalImage.url} alt="" referrerPolicy="no-referrer" /> : <span>Image candidate not found</span>}</div>
+              {scene.externalImage && <ExternalImagePreview image={scene.externalImage} />}
               <label>Narration<textarea value={scene.narration} onChange={(event) => updateScene(index, 'narration', event.target.value)} rows={2} maxLength={600} required /></label>
               <label>Recall question<input value={scene.recallQuestion} onChange={(event) => updateScene(index, 'recallQuestion', event.target.value)} maxLength={240} required /></label>
               <label>Expected answer<input value={scene.expectedAnswer} onChange={(event) => updateScene(index, 'expectedAnswer', event.target.value)} maxLength={200} required /></label>
@@ -551,7 +575,10 @@ function StoryEditor({
           })}
           {error && <p className="inline-error">{error}</p>}
           <div className="editor-actions"><button className="button button-secondary" disabled={busy}>Save changes</button><button type="button" className="button button-primary" disabled={busy} onClick={() => void action(`/stories/${story.id}/approve`, {}, 'Story approved. It can now be assigned.')}>Approve story</button></div>
-        </form> : <div className="scene-readonly-list">{story.scenes.map((scene, index) => <div className="scene-readonly" key={`${scene.photoId}-${index}`}><b>Scene {index + 1}</b><p>{scene.narration}</p><small>{scene.recallQuestion}</small></div>)}
+        </form> : <div className="scene-readonly-list">{story.scenes.map((scene, index) => {
+          const photo = patient.photos.find((item) => item.id === scene.photoId);
+          return <div className="scene-readonly" key={`${scene.photoId}-${index}`}><b>Scene {index + 1}</b>{photo ? <PhotoImage photo={photo} alt={photo.caption} /> : scene.externalImage && <ExternalImagePreview image={scene.externalImage} />}<p>{scene.narration}</p><small>{scene.recallQuestion}</small></div>;
+        })}
           {error && <p className="inline-error">{error}</p>}
           {(story.status === 'APPROVED' || story.status === 'ASSIGNED') && <div className="editor-actions">
             <label className="assign-select">Assign to <select value={selectedPatient} disabled={story.status !== 'APPROVED' || busy} onChange={(event) => setSelectedPatient(event.target.value)}>{patients.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -778,7 +805,7 @@ function PatientExperience({ onSignOut }: { onSignOut: () => void }) {
         {activeGame && activeScene ? (
           <div className="game-card">
             <div className="game-topline"><button className="patient-back" onClick={leaveStory}>← Back to stories</button><span>Story {sceneIndex + 1} of {activeGame.story.scenes.length}</span></div>
-            {activePhoto && <PhotoImage photo={activePhoto} className="game-photo" alt={activePhoto.caption} />}
+            {activePhoto ? <PhotoImage photo={activePhoto} className="game-photo" alt={activePhoto.caption} /> : activeScene.externalImage ? <ExternalImagePreview image={activeScene.externalImage} patientView /> : <div className="game-image-missing">Your doctor is reviewing the image for this scene.</div>}
             <h1 className="game-title">{activeGame.story.title}</h1>
             {!questionVisible ? <div className="narration-panel"><p>{activeScene.narration}</p><button className="button patient-play" onClick={() => speakNarration(activeScene.narration)}>▶ Listen to the story</button><button className="button button-primary patient-next" onClick={() => setQuestionVisible(true)}>Continue</button></div> :
               <div className="question-panel"><p className="question-label">A little question</p><h2>{activeScene.recallQuestion}</h2><div className="answer-options">{activeScene.answerOptions.map((option) => <button className={selectedAnswer === option ? 'answer-button chosen' : 'answer-button'} key={option} onClick={() => answerQuestion(option)}>{option}</button>)}</div><button className="button button-primary patient-next" disabled={!selectedAnswer || busy} onClick={() => void continueStory()}>{busy ? 'Saving…' : sceneIndex === activeGame.story.scenes.length - 1 ? 'Finish story' : 'Next scene'}</button></div>}

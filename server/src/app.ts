@@ -29,6 +29,7 @@ import {
 } from './lib/schemas.js';
 import { draftStory, summarizeSession } from './services/gemini.js';
 import { requireStoryTransition } from './services/story-status.js';
+import { addLicensedImages } from './services/wikimedia.js';
 
 const app = express();
 const uploadsDirectory = fileURLToPath(new URL('../uploads/', import.meta.url));
@@ -258,11 +259,10 @@ app.post('/patients/:id/stories/generate', authenticate, requireRole('DOCTOR'), 
     select: { id: true, caption: true },
     orderBy: { createdAt: 'asc' },
   });
-  if (photos.length === 0) throw new HttpError(400, 'Add at least one approved photo before drafting a story.');
   const generated = await draftStory(prompt, photos);
-  const parsedScenes = generated.scenes.map((scene) => sceneSchema.parse(scene));
+  const parsedScenes = await addLicensedImages(generated.scenes.map((scene) => sceneSchema.parse(scene)));
   const referencedPhotoIds = new Set(photos.map((photo) => photo.id));
-  if (parsedScenes.some((scene) => !referencedPhotoIds.has(scene.photoId))) {
+  if (parsedScenes.some((scene) => scene.photoId !== null && !referencedPhotoIds.has(scene.photoId))) {
     throw new HttpError(502, 'The story draft referred to a photo that is not available for this patient.');
   }
   const story = await prisma.story.create({
@@ -286,7 +286,7 @@ app.patch('/stories/:id', authenticate, requireRole('DOCTOR'), asyncRoute(async 
     select: { id: true },
   })).map((photo) => photo.id));
   const scenes = input.scenes.map((scene) => sceneSchema.parse(scene));
-  if (scenes.some((scene) => !patientPhotoIds.has(scene.photoId))) {
+  if (scenes.some((scene) => scene.photoId !== null && !patientPhotoIds.has(scene.photoId))) {
     throw new HttpError(400, 'Every story scene must use a photo belonging to this patient.');
   }
   if (scenes.some((scene) => !scene.answerOptions.includes(scene.expectedAnswer))) {
@@ -407,7 +407,9 @@ app.get('/me/photos', authenticate, requireRole('PATIENT'), asyncRoute(async (re
   });
   const photoIds = new Set<string>();
   for (const story of stories) {
-    for (const scene of sceneSchema.array().parse(JSON.parse(story.scenesJson))) photoIds.add(scene.photoId);
+    for (const scene of sceneSchema.array().parse(JSON.parse(story.scenesJson))) {
+      if (scene.photoId !== null) photoIds.add(scene.photoId);
+    }
   }
   const photos = await prisma.photo.findMany({
     where: { patientId: patientId(request), id: { in: [...photoIds] } },
