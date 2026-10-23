@@ -93,6 +93,7 @@ The seed creates four simple placeholder photos and three stories (one each in D
 - Sign in on the patient's device with the patient login.
 - Check the required caregiver-present confirmation before starting.
 - View assigned stories one scene at a time. Use the listen button for browser narration, read the on-screen text, and select an answer to continue.
+- If a browser closes mid-story, sign in again, confirm the caregiver is present, and choose **Resume story**. The story restarts at scene one because in-progress answers are not stored; the unfinished session is reused so the story can still be completed.
 - Use the persistent **Call my caregiver** button to send an alert to the doctor's dashboard. If it is not acknowledged after two minutes, the patient screen displays: “Your caregiver has been told. Please wait here, or ask someone nearby.”
 
 Voice availability depends on the browser/device. English is the only language in this prototype.

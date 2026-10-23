@@ -308,7 +308,9 @@ app.post('/stories/:id/reset', authenticate, requireRole('DOCTOR'), asyncRoute(a
   const activeSession = await prisma.session.findFirst({
     where: { storyId: story.id, endedAt: null },
   });
-  if (activeSession) throw new HttpError(409, 'A story with an active patient session cannot be reset.');
+  if (activeSession) {
+    throw new HttpError(409, 'A patient session for this story is still open. Sign in to the patient account and resume and finish the story before resetting it.');
+  }
   const updated = await prisma.story.update({
     where: { id: story.id },
     data: { status: 'DRAFT', approvedAt: null, assignedAt: null },
@@ -398,6 +400,26 @@ app.get('/me/stories', authenticate, requireRole('PATIENT'), asyncRoute(async (r
     orderBy: { assignedAt: 'desc' },
   });
   return { stories: stories.map(serializedStory) };
+}));
+
+app.get('/me/sessions/active', authenticate, requireRole('PATIENT'), asyncRoute(async (request) => {
+  const sessions = await prisma.session.findMany({
+    where: {
+      patientId: patientId(request),
+      endedAt: null,
+      story: { status: 'ASSIGNED' },
+    },
+    include: { story: true },
+    orderBy: { startedAt: 'desc' },
+  });
+  return {
+    sessions: sessions.map((session) => ({
+      id: session.id,
+      storyId: session.storyId,
+      startedAt: session.startedAt,
+      story: serializedStory(session.story),
+    })),
+  };
 }));
 
 app.get('/me/photos', authenticate, requireRole('PATIENT'), asyncRoute(async (request) => {

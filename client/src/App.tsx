@@ -650,10 +650,12 @@ function DoctorSessions({ sessions }: { sessions: SessionRow[] }) {
 }
 
 type ActiveGame = { story: Story; sessionId: string };
+type ActivePatientSession = { id: string; storyId: string; startedAt: string; story: Story };
 
 function PatientExperience({ onSignOut }: { onSignOut: () => void }) {
   const [stories, setStories] = useState<Story[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [activeSessions, setActiveSessions] = useState<ActivePatientSession[]>([]);
   const [checkedCaregiver, setCheckedCaregiver] = useState(false);
   const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
   const [sceneIndex, setSceneIndex] = useState(0);
@@ -670,12 +672,14 @@ function PatientExperience({ onSignOut }: { onSignOut: () => void }) {
 
   const loadAssigned = useCallback(async () => {
     try {
-      const [storyData, photoData] = await Promise.all([
+      const [storyData, photoData, sessionData] = await Promise.all([
         api<{ stories: Story[] }>('/me/stories'),
         api<{ photos: Photo[] }>('/me/photos'),
+        api<{ sessions: ActivePatientSession[] }>('/me/sessions/active'),
       ]);
       setStories(storyData.stories);
       setPhotos(photoData.photos);
+      setActiveSessions(sessionData.sessions);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not load your stories.');
     }
@@ -734,6 +738,17 @@ function PatientExperience({ onSignOut }: { onSignOut: () => void }) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not start the story.');
     } finally { setBusy(false); }
+  }
+
+  function resumeStory(session: ActivePatientSession) {
+    setError('');
+    setNotice('This story is starting again from scene one. Answers from the interrupted session were not saved.');
+    setActiveGame({ story: session.story, sessionId: session.id });
+    setSceneIndex(0);
+    setQuestionVisible(false);
+    setAnswers({});
+    setSelectedAnswer('');
+    setFinished(false);
   }
 
   function answerQuestion(answer: string) {
@@ -819,10 +834,17 @@ function PatientExperience({ onSignOut }: { onSignOut: () => void }) {
             <p>Choose a story to look at together.</p>
             <label className="caregiver-confirm"><input type="checkbox" checked={checkedCaregiver} onChange={(event) => setCheckedCaregiver(event.target.checked)} /><span><b>My caregiver is here with me.</b><small>Please ask your caregiver to stay with you during the story.</small></span></label>
             {stories.length === 0 ? <div className="no-stories"><p>There are no stories ready yet.</p><small>Your doctor will add a story for you.</small></div> :
-              <div className="patient-story-list">{stories.map((story) => <article className="patient-story-card" key={story.id}>
-                <span className="patient-story-art">✦</span><span className="patient-story-info"><b>{story.title}</b><small>{story.scenes.length} gentle {story.scenes.length === 1 ? 'scene' : 'scenes'}</small></span>
-                <button className="button button-primary" disabled={!checkedCaregiver || busy} onClick={() => void startStory(story)}>Start story</button>
-              </article>)}</div>}
+              <div className="patient-story-list">{stories.map((story) => {
+                const activeSession = activeSessions.find((session) => session.storyId === story.id);
+                return <article className="patient-story-card" key={story.id}>
+                  <span className="patient-story-art">✦</span><span className="patient-story-info"><b>{story.title}</b><small>{story.scenes.length} gentle {story.scenes.length === 1 ? 'scene' : 'scenes'}</small></span>
+                  {activeSession ? (
+                    <button className="button button-primary" disabled={!checkedCaregiver || busy} onClick={() => resumeStory(activeSession)}>Resume story</button>
+                  ) : (
+                    <button className="button button-primary" disabled={!checkedCaregiver || busy} onClick={() => void startStory(story)}>Start story</button>
+                  )}
+                </article>;
+              })}</div>}
           </div>
         )}
         {error && <p className="patient-notice patient-error" role="alert">{error}</p>}

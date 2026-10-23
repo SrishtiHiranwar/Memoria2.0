@@ -31,6 +31,12 @@ test('patient resources require authentication', async () => {
   assert.deepEqual(await response.json(), { error: 'Please sign in to continue.' });
 });
 
+test('active patient sessions require authentication', async () => {
+  const response = await fetch(`${origin}/me/sessions/active`);
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Please sign in to continue.' });
+});
+
 test('uploaded photo content requires authentication', async () => {
   const response = await fetch(`${origin}/photos/not-a-photo/content`);
   assert.equal(response.status, 401);
