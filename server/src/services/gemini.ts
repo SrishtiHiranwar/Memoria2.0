@@ -7,13 +7,44 @@ import {
   geminiSummarySchema,
   type sceneSchema,
 } from '../lib/schemas.js';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 
 type Scene = z.infer<typeof sceneSchema>;
 
 const promptDirectory = new URL('../prompts/', import.meta.url);
 const generationCache = new Map<string, { expiresAt: number; value: z.infer<typeof geminiStorySchema> }>();
-const model = 'gemini-2.5-flash-lite';
+const model = 'gemini-3.5-flash-lite';
+const sceneResponseSchema = {
+  type: 'object',
+  properties: {
+    photoId: { type: 'string' },
+    narration: { type: 'string' },
+    recallQuestion: { type: 'string' },
+    expectedAnswer: { type: 'string' },
+    answerOptions: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 3 },
+  },
+  required: ['photoId', 'narration', 'recallQuestion', 'expectedAnswer', 'answerOptions'],
+  additionalProperties: false,
+};
+const storyResponseSchema = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    scenes: { type: 'array', items: sceneResponseSchema, minItems: 1, maxItems: 8 },
+  },
+  required: ['title', 'scenes'],
+  additionalProperties: false,
+};
+const summaryResponseSchema = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    concerns: { type: 'array', items: { type: 'string' }, maxItems: 5 },
+    doctorReviewNote: { type: 'string' },
+  },
+  required: ['summary', 'concerns', 'doctorReviewNote'],
+  additionalProperties: false,
+};
 
 function recordCall() {
   console.info(JSON.stringify({
@@ -25,6 +56,18 @@ function recordCall() {
 
 function friendlyError(error: unknown): AIServiceError {
   const detail = error instanceof Error ? error.message : '';
+  const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined;
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  const safeDetail = detail
+    .replaceAll(process.env.GEMINI_API_KEY ?? '', '[redacted]')
+    .slice(0, 300);
+  console.warn(JSON.stringify({
+    type: 'gemini_request_failed',
+    errorType: error instanceof Error ? error.name : 'UnknownError',
+    status: typeof status === 'number' || typeof status === 'string' ? status : undefined,
+    code: typeof code === 'number' || typeof code === 'string' ? code : undefined,
+    detail: safeDetail,
+  }));
   if (/429|resource_exhausted|rate.?limit/i.test(detail)) {
     return new AIServiceError(429, 'The story assistant is busy right now. Please wait a moment and try again.');
   }
@@ -34,7 +77,7 @@ function friendlyError(error: unknown): AIServiceError {
   return new AIServiceError(502, 'The story assistant could not complete that request. Please try again.');
 }
 
-async function generateJson(systemInstruction: string, contents: string) {
+async function generateJson(systemInstruction: string, contents: string, responseJsonSchema: object) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new AIServiceError(503, 'Story drafting is unavailable until the server Gemini key is configured.');
   recordCall();
@@ -43,7 +86,7 @@ async function generateJson(systemInstruction: string, contents: string) {
     const result = await ai.models.generateContent({
       model,
       contents,
-      config: { responseMimeType: 'application/json', systemInstruction },
+      config: { responseMimeType: 'application/json', responseJsonSchema, systemInstruction },
     });
     const text = result.text;
     if (!text) throw new Error('Empty AI response');
@@ -84,7 +127,7 @@ export async function draftStory(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response: unknown;
     try {
-      response = await generateJson(systemPrompt, input);
+      response = await generateJson(systemPrompt, input, storyResponseSchema);
       parsed = geminiStorySchema.parse(response);
       const allowedIds = new Set(keyedPhotos.map((photo) => photo.id));
       if (parsed.scenes.some((scene) => !allowedIds.has(scene.photoId))) {
@@ -94,6 +137,15 @@ export async function draftStory(
       }
     } catch (error) {
       if (error instanceof AIServiceError && error.status !== 502) throw error;
+      if (error instanceof ZodError) {
+        console.warn(JSON.stringify({
+          type: 'gemini_output_rejected',
+          attempt: attempt + 1,
+          issues: error.issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })),
+        }));
+      } else if (error instanceof SyntaxError) {
+        console.warn(JSON.stringify({ type: 'gemini_invalid_json', attempt: attempt + 1 }));
+      }
       parsed = undefined;
     }
   }
@@ -116,7 +168,7 @@ export async function summarizeSession(results: unknown) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await generateJson(systemPrompt, `Session results:\n${JSON.stringify(results)}`);
+      const response = await generateJson(systemPrompt, `Session results:\n${JSON.stringify(results)}`, summaryResponseSchema);
       return geminiSummarySchema.parse(response);
     } catch (error) {
       if (error instanceof AIServiceError && error.status !== 502) throw error;
