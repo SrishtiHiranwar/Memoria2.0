@@ -60,6 +60,7 @@ export const storyDraftUpdateSchema = z.object({
   title: z.string().trim().min(1).max(160),
   prompt: z.string().trim().min(5).max(2000),
   scenes: z.array(sceneSchema).min(1).max(8),
+  experienceMode: z.enum(['STORY', '3D']).default('STORY'),
 }).strict();
 
 export const assignStorySchema = z.object({ patientId: idSchema }).strict();
@@ -76,6 +77,60 @@ export const sessionCompleteSchema = z.object({
 }).strict();
 
 export const alertFallbackSchema = z.object({ fallbackShown: z.literal(true) }).strict();
+
+export const patientStoryTranslateSchema = z.object({
+  storyIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length),
+  locale: z.literal('hi-IN'),
+}).strict();
+
+export const careGoalCreateSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  measure: z.string().trim().min(1).max(100),
+  unit: z.string().trim().min(1).max(40),
+  baselineValue: z.number().finite().min(-10000000).max(10000000).optional(),
+  targetValue: z.number().finite().min(-10000000).max(10000000).optional(),
+  reviewDate: z.string().date().optional(),
+  notes: z.string().trim().max(600).optional(),
+}).strict();
+
+export const careMeasurementSchema = z.object({
+  value: z.number().finite().min(-10000000).max(10000000),
+  measuredAt: z.string().datetime().optional(),
+  note: z.string().trim().max(300).optional(),
+}).strict();
+
+export const medicalRecordAnalysisSchema = z.object({
+  summary: z.string().trim().min(1).max(1600),
+  observations: z.array(z.object({
+    recordedAt: z.string().date().nullable(),
+    category: z.enum(['measurement', 'symptom', 'medication', 'diagnosis', 'procedure', 'other']),
+    label: z.string().trim().min(1).max(100),
+    detail: z.string().trim().min(1).max(400),
+    numericValue: z.number().finite().min(-10000000).max(10000000).nullable(),
+    unit: z.string().trim().max(40),
+    sourceExcerpt: z.string().trim().max(240),
+  }).strict()).max(30),
+}).strict();
+
+const hindiText = (maximumLength: number) => z.string().trim().min(1).max(maximumLength).refine(
+  (text) => /[\u0900-\u097f]/u.test(text),
+  'Hindi translation must use Devanagari script.',
+);
+
+export const patientStoryTranslationSchema = z.object({
+  stories: z.array(z.object({
+    id: idSchema,
+    title: hindiText(160),
+    scenes: z.array(z.object({
+      narration: hindiText(600),
+      recallQuestion: hindiText(240),
+      expectedAnswer: hindiText(200),
+      answerOptions: z.array(hindiText(200)).min(2).max(3),
+    }).strict().refine((scene) => scene.answerOptions.includes(scene.expectedAnswer), {
+      message: 'Translated choices must include the expected answer.',
+    })).min(1).max(8),
+  }).strict()).max(20),
+}).strict();
 
 export const geminiStorySchema = z.object({
   title: safeGeneratedText(160),

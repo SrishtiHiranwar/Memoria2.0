@@ -4,7 +4,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import multer from 'multer';
@@ -16,26 +16,35 @@ import { prisma } from './lib/prisma.js';
 import {
   alertFallbackSchema,
   assignStorySchema,
+  careGoalCreateSchema,
+  careMeasurementSchema,
   captionSchema,
   emptyBodySchema,
   idSchema,
   loginSchema,
+  medicalRecordAnalysisSchema,
   patientCreateSchema,
+  patientStoryTranslateSchema,
   sceneSchema,
   sessionCompleteSchema,
   sessionCreateSchema,
   storyDraftUpdateSchema,
   storyGenerateSchema,
 } from './lib/schemas.js';
-import { draftStory, summarizeSession } from './services/gemini.js';
+import { analyzeMedicalRecord, draftStory, summarizeSession, translatePatientStories } from './services/gemini.js';
 import { requireStoryTransition } from './services/story-status.js';
 import { addLicensedImages } from './services/wikimedia.js';
 
 const app = express();
 const uploadsDirectory = fileURLToPath(new URL('../uploads/', import.meta.url));
+const medicalRecordsDirectory = path.join(uploadsDirectory, 'medical-records');
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+});
+const medicalRecordUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
 });
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -50,6 +59,27 @@ const generationLimiter = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'Too many story drafts were requested. Please wait before trying again.' },
+});
+const translationLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many translation requests. Please wait before trying again.' },
+});
+const medicalRecordLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many medical record evaluations. Please wait before trying again.' },
+});
+const medicalUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many medical records were uploaded. Please wait before trying again.' },
 });
 
 app.disable('x-powered-by');
@@ -98,6 +128,80 @@ async function ownedStory(id: string, ownerId: string) {
 
 function serializedStory<T extends { scenesJson: string }>(story: T) {
   return { ...story, scenes: JSON.parse(story.scenesJson) as unknown, scenesJson: undefined };
+}
+
+function serializedMedicalRecord<T extends {
+  id: string;
+  patientId: string;
+  fileName: string;
+  mimeType: string;
+  analysisJson: string | null;
+  evaluatedAt: Date | null;
+  uploadedByRole: string;
+  createdAt: Date;
+}>(record: T) {
+  return {
+    id: record.id,
+    patientId: record.patientId,
+    fileName: record.fileName,
+    mimeType: record.mimeType,
+    evaluatedAt: record.evaluatedAt,
+    uploadedByRole: record.uploadedByRole,
+    createdAt: record.createdAt,
+    contentUrl: `/medical-records/${record.id}/content`,
+    analysis: record.analysisJson ? medicalRecordAnalysisSchema.parse(JSON.parse(record.analysisJson) as unknown) : null,
+  };
+}
+
+async function accessibleMedicalRecord(id: string, request: Request) {
+  const record = await prisma.medicalRecord.findUnique({ where: { id }, include: { patient: true } });
+  if (!record) throw new HttpError(404, 'Medical record not found.');
+  if (request.auth?.role === 'DOCTOR') {
+    await ownedPatient(record.patientId, request.auth.sub);
+  } else if (request.auth?.role !== 'PATIENT' || request.auth.patientId !== record.patientId) {
+    throw new HttpError(404, 'Medical record not found.');
+  }
+  return record;
+}
+
+async function storeMedicalRecord(request: Request, patientRecord: { id: string }) {
+  const file = request.file;
+  if (!file) throw new HttpError(400, 'Choose a PDF or image record to upload.');
+  const detected = await fileTypeFromBuffer(file.buffer);
+  const allowedTypes = new Map([
+    ['application/pdf', 'pdf'],
+    ['image/jpeg', 'jpg'],
+    ['image/png', 'png'],
+    ['image/webp', 'webp'],
+  ]);
+  const extension = detected ? allowedTypes.get(detected.mime) : undefined;
+  if (!detected || !extension) {
+    throw new HttpError(400, 'Upload a valid PDF, JPEG, PNG, or WebP medical record.');
+  }
+  const filename = `${randomUUID()}.${extension}`;
+  const filePath = path.join(medicalRecordsDirectory, filename);
+  await mkdir(medicalRecordsDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(filePath, file.buffer, { flag: 'wx', mode: 0o600 });
+  try {
+    const uploadedName = path.basename(file.originalname).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 160) || 'Medical record';
+    const record = await prisma.medicalRecord.create({
+      data: {
+        patientId: patientRecord.id,
+        fileName: uploadedName,
+        mimeType: detected.mime,
+        filePath: filename,
+        uploadedByRole: request.auth!.role,
+      },
+    });
+    return serializedMedicalRecord(record);
+  } catch (error) {
+    try {
+      await unlink(filePath);
+    } catch (cleanupError) {
+      console.error('Could not remove medical record file after save failure:', cleanupError);
+    }
+    throw error;
+  }
 }
 
 function asyncRoute(
@@ -206,6 +310,8 @@ app.get('/patients', authenticate, requireRole('DOCTOR'), asyncRoute(async (requ
       user: { select: { id: true, email: true } },
       photos: { orderBy: { createdAt: 'desc' } },
       stories: { orderBy: { createdAt: 'desc' } },
+      medicalRecords: { orderBy: { createdAt: 'desc' } },
+      careGoals: { include: { measurements: { orderBy: { measuredAt: 'asc' } } }, orderBy: { createdAt: 'asc' } },
     },
   });
   return {
@@ -216,8 +322,140 @@ app.get('/patients', authenticate, requireRole('DOCTOR'), asyncRoute(async (requ
         imageUrl: photo.imageUrl.startsWith('/uploads/') ? `/photos/${photo.id}/content` : photo.imageUrl,
       })),
       stories: patient.stories.map(serializedStory),
+      medicalRecords: patient.medicalRecords.map(serializedMedicalRecord),
     })),
   };
+}));
+
+app.post(
+  '/patients/:id/medical-records',
+  authenticate,
+  requireRole('DOCTOR'),
+  medicalUploadLimiter,
+  medicalRecordUpload.single('record'),
+  asyncRoute(async (request) => {
+    const patient = await ownedPatient(routeId(request.params.id), doctorId(request));
+    const record = await storeMedicalRecord(request, patient);
+    return { record };
+  }),
+);
+
+app.post(
+  '/me/medical-records',
+  authenticate,
+  requireRole('PATIENT'),
+  medicalUploadLimiter,
+  medicalRecordUpload.single('record'),
+  asyncRoute(async (request) => {
+    const patient = await prisma.patient.findUnique({ where: { id: patientId(request) }, select: { id: true } });
+    if (!patient) throw new HttpError(404, 'Patient not found.');
+    const record = await storeMedicalRecord(request, patient);
+    return { record };
+  }),
+);
+
+app.get('/medical-records/:id/content', authenticate, asyncRoute(async (request, response) => {
+  const record = await accessibleMedicalRecord(routeId(request.params.id), request);
+  const safePath = path.join(medicalRecordsDirectory, path.basename(record.filePath));
+  let contents: Buffer;
+  try {
+    contents = await readFile(safePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new HttpError(404, 'Medical record file not found.');
+    throw error;
+  }
+  const safeName = record.fileName.replace(/["\\\r\n]/g, '_');
+  response
+    .type(record.mimeType)
+    .setHeader(
+      'Content-Disposition',
+      `attachment; filename="${safeName.replace(/[^A-Za-z0-9._ -]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(record.fileName)}`,
+    )
+    .setHeader('Cache-Control', 'private, no-store')
+    .setHeader('X-Content-Type-Options', 'nosniff')
+    .send(contents);
+}));
+
+app.post('/medical-records/:id/evaluate', authenticate, medicalRecordLimiter, asyncRoute(async (request) => {
+  const record = await accessibleMedicalRecord(routeId(request.params.id), request);
+  const filePath = path.join(medicalRecordsDirectory, path.basename(record.filePath));
+  let contents: Buffer;
+  try {
+    contents = await readFile(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new HttpError(404, 'Medical record file not found.');
+    throw error;
+  }
+  const analysis = await analyzeMedicalRecord(contents, record.mimeType);
+  const evaluatedAt = new Date();
+  const updated = await prisma.medicalRecord.update({
+    where: { id: record.id },
+    data: { analysisJson: JSON.stringify(analysis), evaluatedAt },
+  });
+  return { record: serializedMedicalRecord(updated), ai_generated: true, label: 'AI-extracted information · verify against the original record' };
+}));
+
+app.post('/patients/:id/care-goals', authenticate, requireRole('DOCTOR'), asyncRoute(async (request) => {
+  const patient = await ownedPatient(routeId(request.params.id), doctorId(request));
+  const input = body(careGoalCreateSchema, request);
+  const goal = await prisma.careGoal.create({
+    data: {
+      patientId: patient.id,
+      title: input.title,
+      measure: input.measure,
+      unit: input.unit,
+      baselineValue: input.baselineValue,
+      targetValue: input.targetValue,
+      reviewDate: input.reviewDate ? new Date(`${input.reviewDate}T00:00:00.000Z`) : undefined,
+      notes: input.notes || null,
+    },
+    include: { measurements: { orderBy: { measuredAt: 'asc' } } },
+  });
+  return { goal };
+}));
+
+app.post('/care-goals/:id/measurements', authenticate, requireRole('DOCTOR'), asyncRoute(async (request) => {
+  const goalId = routeId(request.params.id);
+  const goal = await prisma.careGoal.findFirst({
+    where: { id: goalId, patient: { createdByDoctorId: doctorId(request) } },
+  });
+  if (!goal) throw new HttpError(404, 'Care goal not found.');
+  const input = body(careMeasurementSchema, request);
+  const measurement = await prisma.careMeasurement.create({
+    data: {
+      goalId: goal.id,
+      value: input.value,
+      measuredAt: input.measuredAt ? new Date(input.measuredAt) : undefined,
+      note: input.note || null,
+    },
+  });
+  return { measurement };
+}));
+
+app.get('/patients/:id/health-data', authenticate, requireRole('DOCTOR'), asyncRoute(async (request) => {
+  const patient = await ownedPatient(routeId(request.params.id), doctorId(request));
+  const [records, careGoals] = await Promise.all([
+    prisma.medicalRecord.findMany({ where: { patientId: patient.id }, orderBy: { createdAt: 'desc' } }),
+    prisma.careGoal.findMany({
+      where: { patientId: patient.id },
+      include: { measurements: { orderBy: { measuredAt: 'asc' } } },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ]);
+  return { records: records.map(serializedMedicalRecord), careGoals };
+}));
+
+app.get('/me/health-data', authenticate, requireRole('PATIENT'), asyncRoute(async (request) => {
+  const id = patientId(request);
+  const [records, careGoals] = await Promise.all([
+    prisma.medicalRecord.findMany({ where: { patientId: id }, orderBy: { createdAt: 'desc' } }),
+    prisma.careGoal.findMany({
+      where: { patientId: id },
+      include: { measurements: { orderBy: { measuredAt: 'asc' } } },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ]);
+  return { records: records.map(serializedMedicalRecord), careGoals };
 }));
 
 app.post(
@@ -294,7 +532,12 @@ app.patch('/stories/:id', authenticate, requireRole('DOCTOR'), asyncRoute(async 
   }
   const updated = await prisma.story.update({
     where: { id: story.id },
-    data: { title: input.title, prompt: input.prompt, scenesJson: JSON.stringify(scenes) },
+    data: {
+      title: input.title,
+      prompt: input.prompt,
+      scenesJson: JSON.stringify(scenes),
+      experienceMode: input.experienceMode,
+    },
   });
   return { story: serializedStory(updated) };
 }));
@@ -400,6 +643,30 @@ app.get('/me/stories', authenticate, requireRole('PATIENT'), asyncRoute(async (r
     orderBy: { assignedAt: 'desc' },
   });
   return { stories: stories.map(serializedStory) };
+}));
+
+app.post('/me/stories/translate', authenticate, requireRole('PATIENT'), translationLimiter, asyncRoute(async (request) => {
+  const input = body(patientStoryTranslateSchema, request);
+  const stories = await prisma.story.findMany({
+    where: {
+      id: { in: input.storyIds },
+      patientId: patientId(request),
+      status: 'ASSIGNED',
+    },
+    orderBy: { assignedAt: 'desc' },
+  });
+  if (stories.length !== input.storyIds.length) throw new HttpError(404, 'One or more assigned stories could not be found.');
+  const translations = await translatePatientStories(stories.map((story) => ({
+    id: story.id,
+    title: story.title,
+    scenes: JSON.parse(story.scenesJson) as Array<{
+      narration: string;
+      recallQuestion: string;
+      expectedAnswer: string;
+      answerOptions: string[];
+    }>,
+  })));
+  return translations;
 }));
 
 app.get('/me/sessions/active', authenticate, requireRole('PATIENT'), asyncRoute(async (request) => {

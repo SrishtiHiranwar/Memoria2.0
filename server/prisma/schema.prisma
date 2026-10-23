@@ -28,6 +28,8 @@ model Patient {
   stories           Story[]
   sessions          Session[]
   alerts            Alert[]
+  medicalRecords    MedicalRecord[]
+  careGoals         CareGoal[]
 }
 
 model Photo {
@@ -48,6 +50,7 @@ model Story {
   // Valid lifecycle values are DRAFT, APPROVED, ASSIGNED, and COMPLETED.
   status     String
   scenesJson String    @default("[]")
+  experienceMode String @default("STORY")
   createdAt  DateTime  @default(now())
   approvedAt DateTime?
   assignedAt DateTime?
@@ -75,4 +78,47 @@ model Alert {
   acknowledgedAt  DateTime?
   fallbackShownAt DateTime?
   patient         Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+}
+
+model MedicalRecord {
+  id             String   @id @default(cuid())
+  patientId      String
+  fileName       String
+  mimeType       String
+  filePath       String
+  analysisJson   String?
+  evaluatedAt    DateTime?
+  uploadedByRole String
+  createdAt      DateTime @default(now())
+  patient        Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId, createdAt])
+}
+
+model CareGoal {
+  id            String            @id @default(cuid())
+  patientId     String
+  title         String
+  measure       String
+  unit          String
+  baselineValue Float?
+  targetValue   Float?
+  reviewDate    DateTime?
+  notes         String?
+  createdAt     DateTime          @default(now())
+  patient       Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  measurements  CareMeasurement[]
+
+  @@index([patientId, createdAt])
+}
+
+model CareMeasurement {
+  id         String   @id @default(cuid())
+  goalId     String
+  value      Float
+  measuredAt DateTime @default(now())
+  note       String?
+  goal       CareGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@index([goalId, measuredAt])
 }

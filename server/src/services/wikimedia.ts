@@ -24,6 +24,11 @@ const commonsResponseSchema = z.object({
 
 const searchCache = new Map<string, { expiresAt: number; image: ExternalImage | null }>();
 const cacheDuration = 10 * 60 * 1000;
+const ignoredImageWords = new Set([
+  'about', 'above', 'after', 'along', 'around', 'candidate', 'image', 'into', 'looking', 'photo',
+  'scene', 'show', 'some', 'test', 'that', 'their', 'there', 'these', 'they', 'this', 'those',
+  'with', 'without',
+]);
 
 function plainText(value: unknown) {
   return (typeof value === 'string' ? value : '')
@@ -39,6 +44,27 @@ function plainText(value: unknown) {
 
 export function isPermittedImageLicense(name: string) {
   return /^(?:CC0\b|CC BY(?:-SA)?(?:\s|$)|public domain\b|PD\b)/i.test(name.trim());
+}
+
+function imageKeywords(value: string) {
+  return value.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length >= 3 && !ignoredImageWords.has(word))
+    .map((word) => word.endsWith('ies') && word.length > 5
+      ? `${word.slice(0, -3)}y`
+      : word.endsWith('s') && word.length > 4
+        ? word.slice(0, -1)
+        : word);
+}
+
+export function isRelevantImageMatch(searchTerms: string, candidateDescription: string) {
+  const requested = [...new Set(imageKeywords(searchTerms))];
+  if (requested.length === 0) return false;
+  const candidate = new Set(imageKeywords(candidateDescription));
+  const matches = requested.filter((word) => candidate.has(word)).length;
+  const requiredMatches = requested.length === 1 ? 1 : Math.max(2, Math.ceil(requested.length * 0.5));
+  return matches >= requiredMatches;
 }
 
 function trustedCommonsUrl(value: string | undefined) {
@@ -85,7 +111,7 @@ async function findLicensedImage(searchTerms: string): Promise<ExternalImage | n
     generator: 'search',
     gsrsearch: `${query} filetype:bitmap`,
     gsrnamespace: '6',
-    gsrlimit: '5',
+    gsrlimit: '20',
     prop: 'imageinfo',
     iiprop: 'url|extmetadata',
     iiurlwidth: '1200',
@@ -117,6 +143,8 @@ async function findLicensedImage(searchTerms: string): Promise<ExternalImage | n
   }
 
   let result: ExternalImage | null = null;
+  let bestMatchCount = 0;
+  const requestedKeywords = [...new Set(imageKeywords(query))];
   for (const page of Object.values(parsed.data.query?.pages ?? {})) {
     const info = page.imageinfo?.[0];
     if (!info) continue;
@@ -125,6 +153,15 @@ async function findLicensedImage(searchTerms: string): Promise<ExternalImage | n
     const licenseUrl = secureHttpsUrl(metadata.LicenseUrl?.value);
     const imageUrl = trustedCommonsUrl(info.thumburl) ?? trustedCommonsUrl(info.url);
     if (!imageUrl || !licenseUrl || !isPermittedImageLicense(licenseName) || (info.mime && !info.mime.startsWith('image/'))) continue;
+    const description = [
+      page.title,
+      metadata.ObjectName?.value,
+      metadata.ImageDescription?.value,
+    ].map(plainText).join(' ');
+    if (!isRelevantImageMatch(query, description)) continue;
+    const candidateKeywords = new Set(imageKeywords(description));
+    const matchCount = requestedKeywords.filter((word) => candidateKeywords.has(word)).length;
+    if (matchCount < bestMatchCount) continue;
     const artist = plainText(metadata.Artist?.value || metadata.Credit?.value);
     const attribution = (artist ? `${artist} — ` : '') + page.title.replace(/^File:/, '');
     const image = externalImageSchema.safeParse({
@@ -136,7 +173,8 @@ async function findLicensedImage(searchTerms: string): Promise<ExternalImage | n
     });
     if (image.success) {
       result = image.data;
-      break;
+      bestMatchCount = matchCount;
+      if (matchCount === requestedKeywords.length) break;
     }
   }
   searchCache.set(query.toLowerCase(), { expiresAt: now + cacheDuration, image: result });
@@ -146,7 +184,16 @@ async function findLicensedImage(searchTerms: string): Promise<ExternalImage | n
 export async function addLicensedImages(scenes: Scene[]): Promise<Scene[]> {
   return Promise.all(scenes.map(async (scene) => {
     if (scene.photoId !== null || !scene.imageSearchQuery) return scene;
-    const externalImage = await findLicensedImage(scene.imageSearchQuery);
-    return externalImage ? { ...scene, externalImage } : scene;
+    try {
+      const externalImage = await findLicensedImage(scene.imageSearchQuery);
+      return externalImage ? { ...scene, externalImage } : scene;
+    } catch (error) {
+      if (!(error instanceof AIServiceError)) throw error;
+      console.warn(JSON.stringify({
+        type: 'licensed_image_search_unavailable',
+        status: error.status,
+      }));
+      return scene;
+    }
   }));
 }

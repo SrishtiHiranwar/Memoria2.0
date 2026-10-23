@@ -37,6 +37,23 @@ test('active patient sessions require authentication', async () => {
   assert.deepEqual(await response.json(), { error: 'Please sign in to continue.' });
 });
 
+test('patient medical history requires authentication', async () => {
+  const response = await fetch(`${origin}/me/health-data`);
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Please sign in to continue.' });
+});
+
+test('patient medical record uploads require authentication before multipart parsing', async () => {
+  const response = await fetch(`${origin}/me/medical-records`, { method: 'POST' });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Please sign in to continue.' });
+});
+
+test('medical record downloads require authentication', async () => {
+  const response = await fetch(`${origin}/medical-records/not-a-record/content`);
+  assert.equal(response.status, 401);
+});
+
 test('uploaded photo content requires authentication', async () => {
   const response = await fetch(`${origin}/photos/not-a-photo/content`);
   assert.equal(response.status, 401);

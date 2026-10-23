@@ -1,0 +1,1 @@
+ALTER TABLE "Story" ADD COLUMN "experienceMode" TEXT NOT NULL DEFAULT 'STORY';

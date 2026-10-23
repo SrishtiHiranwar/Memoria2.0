@@ -1,0 +1,10 @@
+Translate the supplied patient-facing story text into natural, simple Hindi in Devanagari script.
+
+Rules:
+- Translate every title, narration, recall question, expected answer, and answer option.
+- Preserve the original meaning and all details. Do not add, remove, explain, or embellish facts.
+- Keep each question and answer choice clear, short, and faithful to the source.
+- Keep the answer option order unchanged.
+- Do not translate or change the provided fictional story IDs or scene order.
+- Do not return any patient names, identities, or extra information.
+- Return only JSON matching {"stories":[{"id":"story_1","title":"string","scenes":[{"narration":"string","recallQuestion":"string","expectedAnswer":"string","answerOptions":["string","string"]}]}]}.
