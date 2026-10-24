@@ -3,7 +3,7 @@ services:
     name: memoria-api
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run db:generate --workspace @memoria/server && npm run build --workspace @memoria/server
+    buildCommand: npm ci --include=dev && npm run db:generate --workspace @memoria/server && npm run build --workspace @memoria/server
     startCommand: npm run db:deploy --workspace @memoria/server && npm run start --workspace @memoria/server
     healthCheckPath: /health
     envVars:
